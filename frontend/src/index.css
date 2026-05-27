@@ -1,0 +1,39 @@
+@import "tailwindcss";
+
+/* ── 커스텀 CSS 변수 ─────────────────────────────────────────────── */
+:root {
+  --color-brand: #2563eb;       /* blue-600 — primary action */
+  --color-brand-dark: #1d4ed8;  /* blue-700 — hover */
+  --color-surface: #0f172a;     /* slate-900 — dark bg */
+  --color-surface-2: #1e293b;   /* slate-800 — card bg */
+  --color-surface-3: #334155;   /* slate-700 — border / divider */
+  --color-text: #f1f5f9;        /* slate-100 — primary text */
+  --color-text-muted: #94a3b8;  /* slate-400 — secondary text */
+  --color-success: #22c55e;     /* green-500 */
+  --color-danger: #ef4444;      /* red-500 */
+  --color-warning: #f59e0b;     /* amber-500 */
+}
+
+/* ── 기본 스타일 재설정 ──────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  background-color: var(--color-surface);
+  color: var(--color-text);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Leaflet 아이콘 경로 수정 (Vite 번들러 이슈) ─────────────────── */
+.leaflet-container {
+  height: 100%;
+  width: 100%;
+}
