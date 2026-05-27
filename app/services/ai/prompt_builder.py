@@ -138,6 +138,7 @@ class PortfolioContext:
     rate_source: str
     holdings_summary: list[dict]         # 종목별 요약
     optimization_result: dict | None     # ML 최적화 결과 (옵션)
+    alternative_data: dict | None = None # 대안 데이터: SEC EDGAR + DART (옵션)
 
 
 def build_portfolio_report_prompt(
@@ -169,6 +170,7 @@ def build_portfolio_report_prompt(
     # ── [3] 포트폴리오 데이터 (사용자별 가변) ─────────────────────────────
     holdings_text = _format_holdings(context.holdings_summary)
     opt_text = _format_optimization(context.optimization_result)
+    alt_text = _format_alternative_data(context.alternative_data)
 
     portfolio_data = f"""
 [포트폴리오: {context.portfolio_name}]
@@ -184,6 +186,7 @@ def build_portfolio_report_prompt(
 ■ 보유 종목 상세
 {holdings_text}
 {opt_text}
+{alt_text}
 """.strip()
 
     # ── [4] 사용자 질문 (맨 뒤에 배치) ────────────────────────────────────
@@ -265,6 +268,44 @@ def _format_optimization(opt_result: dict | None) -> str:
     if not opt_result:
         return ""
     return f"""
+
 ■ ML 포트폴리오 최적화 결과 (PyPortfolioOpt)
 {opt_result.get('summary', '최적화 데이터 없음')}
 """.strip()
+
+
+def _format_alternative_data(alt_data: dict | None) -> str:
+    """
+    대안 데이터(Alternative Data) 프롬프트 섹션 생성.
+
+    architecture_plan.md §6:
+      - SEC EDGAR Form 4: 내부자 거래 패턴 → 선행 지표 해석
+      - DART 재무공시: 핵심 재무지표 → AI의 펀더멘털 분석 기반
+
+    AI가 "내부자 매도 시그널이 감지되었으므로..." 형태의 근거 있는 브리핑 생성.
+    """
+    if not alt_data:
+        return ""
+
+    sections = []
+
+    # SEC EDGAR 내부자 거래 데이터
+    sec_data: dict = alt_data.get("sec_insider", {})
+    if sec_data:
+        sections.append("\n■ 대안 데이터 (Alternative Data)")
+        for ticker, sec_info in sec_data.items():
+            summary = sec_info.get("summary", "")
+            if summary:
+                sections.append(summary)
+
+    # DART 재무공시 데이터
+    dart_data: dict = alt_data.get("dart_financials", {})
+    if dart_data:
+        if not sections:
+            sections.append("\n■ 대안 데이터 (Alternative Data)")
+        for ticker, dart_info in dart_data.items():
+            summary = dart_info.get("summary", "")
+            if summary:
+                sections.append(summary)
+
+    return "\n".join(sections) if sections else ""

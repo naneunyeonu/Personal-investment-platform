@@ -1,23 +1,25 @@
 """
 AI 리포트 Celery 작업 (ai_reports 큐)
 
-architecture_plan.md §4.1 + §5 구현:
+architecture_plan.md §4.1 + §5 + §6 구현:
   사용자 요청 → FastAPI 즉시 task_id 반환
   → Celery 워커(ai_reports 큐)가 백그라운드 처리
     ① ML 최적화 (PyPortfolioOpt) — Gemini 환각 방지 선행 연산 (§5)
-    ② Gemini API 호출 — ML 결과를 컨텍스트로 주입 (§4.2 암시적 캐싱)
+    ② 대안 데이터 주입 (SEC/DART 캐시 조회) — 정보력 강화 (§6)
+    ③ Gemini API 호출 — ML+대안데이터 컨텍스트 주입 (§4.2 암시적 캐싱)
   → Redis에 결과 저장
   → 프론트엔드에서 폴링 또는 SSE로 결과 수신
 
 작업 목록:
-  generate_portfolio_report_task  — 포트폴리오 분석 리포트 (ML + 암시적 캐싱)
+  generate_portfolio_report_task  — 포트폴리오 분석 리포트 (ML + 대안 데이터 + 캐싱)
   generate_document_summary_task  — 어닝스 콜/공시 요약 (명시적 캐싱)
 
 파이프라인 진행 단계:
-  10%  context_loading   — Celery 직렬화 역직렬화
-  25%  ml_optimization   — PyPortfolioOpt 최적화 (과거 데이터 수집 + 연산)
-  50%  calling_gemini    — Gemini API 호출 (ML 결과 프롬프트 주입)
-  90%  formatting        — 최종 결과 조립
+  10%  context_loading       — Celery 직렬화 역직렬화
+  25%  ml_optimization       — PyPortfolioOpt 최적화
+  40%  alternative_data      — SEC EDGAR / DART 캐시 조회 및 주입 (§6)
+  60%  calling_gemini        — Gemini API 호출
+  90%  formatting            — 최종 결과 조립
 """
 
 import asyncio
@@ -131,8 +133,22 @@ def generate_portfolio_report_task(
         else:
             logger.info("ML optimization skipped (insufficient data) | task=%s", self.request.id)
 
-        # ── 3. Gemini API 호출 (ML 결과 컨텍스트 주입 완료 상태) ──────
-        self.update_state(state="STARTED", meta={"progress": 50, "step": "calling_gemini"})
+        # ── 3. 대안 데이터 주입 (SEC EDGAR + DART 캐시 조회) ──────────
+        # architecture_plan.md §6: 내부자 거래 시그널 + 재무공시 데이터
+        self.update_state(state="STARTED", meta={"progress": 40, "step": "alternative_data"})
+
+        alt_data = _fetch_alternative_data_safe(portfolio_context_dict)
+        if alt_data:
+            ctx.alternative_data = alt_data
+            logger.info(
+                "Alternative data injected | task=%s sec_tickers=%s dart_tickers=%s",
+                self.request.id,
+                list(alt_data.get("sec_insider", {}).keys()),
+                list(alt_data.get("dart_financials", {}).keys()),
+            )
+
+        # ── 4. Gemini API 호출 (ML + 대안 데이터 컨텍스트 주입 완료) ───
+        self.update_state(state="STARTED", meta={"progress": 60, "step": "calling_gemini"})
 
         result = asyncio.run(generate_portfolio_report(ctx, user_question))
 
@@ -144,15 +160,21 @@ def generate_portfolio_report_task(
             "user_id": user_id,
             "question": user_question,
             "ml_optimization_status": opt_result.get("status") if opt_result else "skipped",
+            "alternative_data_status": (
+                f"sec:{len(alt_data.get('sec_insider',{}))} "
+                f"dart:{len(alt_data.get('dart_financials',{}))}"
+                if alt_data else "skipped"
+            ),
             **result,
         }
 
         logger.info(
-            "Portfolio report completed | task=%s tokens=%s cached=%s ml=%s",
+            "Portfolio report completed | task=%s tokens=%s cached=%s ml=%s alt=%s",
             self.request.id,
             result["usage"]["total_tokens"],
             result["usage"]["cached_tokens"],
             final_result["ml_optimization_status"],
+            final_result["alternative_data_status"],
         )
         return final_result
 
@@ -210,6 +232,90 @@ async def _run_ml_optimization_safe(context_dict: dict) -> dict | None:
     except Exception as exc:
         # ML 최적화 실패는 전체 작업을 중단시키지 않음
         logger.warning("ML optimization failed silently | error=%s", exc)
+        return None
+
+
+# ── 대안 데이터 헬퍼 ─────────────────────────────────────────────────────────
+
+def _is_kr_ticker(ticker: str) -> bool:
+    """
+    KR(DART 대상) 티커 여부 판별.
+    KRX 6자리 숫자 코드 또는 yfinance 접미사(.KS/.KQ) 형식.
+    """
+    base = ticker.replace(".KS", "").replace(".KQ", "")
+    return base.isdigit() and len(base) == 6
+
+
+def _fetch_alternative_data_safe(context_dict: dict) -> dict | None:
+    """
+    Redis 캐시에서 대안 데이터(SEC EDGAR + DART) 즉시 조회.
+
+    architecture_plan.md §6:
+      Celery Beat이 주기적으로 캐시를 갱신하므로, 이 함수는 네트워크 호출 없이
+      캐시 히트 데이터만 반환.  캐시 미스 티커는 track_ticker()로 등록하여
+      다음 Beat 사이클에서 자동 수집되도록 트리거.
+
+    캐시 미스 시:
+      - alt_data:watched:{market} Set에 티커 추가 → 다음 Beat 갱신 대상 등록
+      - 이번 요청에서는 해당 티커 데이터 제외 (AI는 나머지 데이터로 분석)
+
+    Returns:
+        {
+          "sec_insider":    {TICKER: sec_data_dict, ...},  # US 주식
+          "dart_financials": {TICKER: dart_data_dict, ...}, # KR 주식
+        }
+        데이터가 하나도 없으면 None 반환.
+    """
+    try:
+        from app.adapters.alternative_data.redis_cache import alt_data_cache
+
+        holdings = context_dict.get("holdings_summary", [])
+        sec_result: dict = {}
+        dart_result: dict = {}
+
+        for h in holdings:
+            ticker: str = h.get("ticker", "")
+            if not ticker:
+                continue
+
+            if _is_kr_ticker(ticker):
+                # KR 종목 → DART 재무공시 캐시 조회
+                stock_code = ticker.replace(".KS", "").replace(".KQ", "")
+                cached = alt_data_cache.get_dart_data(stock_code)
+                if cached:
+                    dart_result[stock_code] = cached
+                else:
+                    # 캐시 미스 → 다음 Beat 사이클에서 수집되도록 등록
+                    alt_data_cache.track_ticker(stock_code, "dart")
+                    logger.debug(
+                        "DART cache miss — registered for next Beat cycle | ticker=%s",
+                        stock_code,
+                    )
+            else:
+                # US 종목 → SEC EDGAR 내부자 거래 캐시 조회
+                ticker_upper = ticker.upper()
+                cached = alt_data_cache.get_sec_data(ticker_upper)
+                if cached:
+                    sec_result[ticker_upper] = cached
+                else:
+                    # 캐시 미스 → 다음 Beat 사이클에서 수집되도록 등록
+                    alt_data_cache.track_ticker(ticker_upper, "sec")
+                    logger.debug(
+                        "SEC cache miss — registered for next Beat cycle | ticker=%s",
+                        ticker_upper,
+                    )
+
+        if not sec_result and not dart_result:
+            return None
+
+        return {
+            "sec_insider": sec_result,
+            "dart_financials": dart_result,
+        }
+
+    except Exception as exc:
+        # 대안 데이터 실패는 전체 리포트를 중단시키지 않음
+        logger.warning("Alternative data fetch failed silently | error=%s", exc)
         return None
 
 
