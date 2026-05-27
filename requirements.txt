@@ -1,0 +1,41 @@
+# ── Web Framework ──────────────────────────────────────────────────────
+fastapi==0.115.12
+uvicorn[standard]==0.34.3
+pydantic==2.11.5
+pydantic-settings==2.9.1
+
+# ── Database ───────────────────────────────────────────────────────────
+sqlalchemy==2.0.41
+asyncpg==0.30.0
+alembic==1.16.1
+psycopg2-binary==2.9.10       # Alembic offline 마이그레이션용
+
+# ── Auth ───────────────────────────────────────────────────────────────
+python-jose[cryptography]==3.4.0
+passlib[bcrypt]==1.7.4
+python-multipart==0.0.20
+
+# ── Task Queue ─────────────────────────────────────────────────────────
+celery==5.5.2
+redis==5.3.0
+flower==2.0.1                  # Celery 모니터링 대시보드
+
+# ── Financial Data ─────────────────────────────────────────────────────
+yfinance==0.2.61
+requests==2.32.3
+httpx==0.28.1
+
+# ── ML / Portfolio Optimization ────────────────────────────────────────
+numpy==2.2.6
+pandas==2.2.3
+scipy==1.15.3
+PyPortfolioOpt==1.5.6
+# riskfolio-lib==6.4.1         # 필요 시 주석 해제 (설치 용량 큼)
+
+# ── LLM ────────────────────────────────────────────────────────────────
+google-generativeai==0.8.5
+
+# ── Utilities ──────────────────────────────────────────────────────────
+python-dotenv==1.1.0
+tenacity==9.1.2                # 재시도 로직
+structlog==25.3.0              # 구조화 로깅
