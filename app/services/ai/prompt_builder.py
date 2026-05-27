@@ -309,3 +309,107 @@ def _format_alternative_data(alt_data: dict | None) -> str:
                 sections.append(summary)
 
     return "\n".join(sections) if sections else ""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 지정학적 리스크 분석 프롬프트 (architecture_plan.md §7)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_risk_analysis_prompt(
+    news_text: str,
+    portfolio_tickers: list[str],
+    supply_chain_nodes: list[dict],
+    user_question: str,
+) -> list[dict]:
+    """
+    지정학적 리스크 분석 프롬프트 생성.
+
+    암시적 캐싱 구조 (§4.2):
+      [1] ARIA 페르소나 (고정 Prefix — 캐시 히트 대상)
+      [2] 공급망 분석 역할 지시문 (고정 Prefix 연장)
+      [3] 공급망 노드 데이터 + 뉴스 텍스트 + 질문 (가변)
+
+    Returns:
+        Gemini content 배열 (3개 turns)
+    """
+    # ── [1][2] 고정 Prefix ────────────────────────────────────────────────
+    supply_chain_context = (
+        f"{INVESTMENT_ADVISOR_PERSONA}\n\n"
+        "[추가 분석 역할: 공급망 지정학적 리스크 전문가]\n"
+        "당신은 글로벌 공급망(Value Chain) 분석과 지정학적 리스크 평가를 전문으로 합니다.\n"
+        "특정 지정학적 이벤트가 발생했을 때:\n"
+        "  1. 공급망 그래프에서 직접 영향을 받는 노드(기업/공장/항구)를 특정합니다.\n"
+        "  2. 의존도(dependency_score)를 기반으로 2차·3차 파급 효과를 추론합니다.\n"
+        "  3. 포트폴리오 보유 종목에 대한 구체적인 리스크 영향을 정량적으로 평가합니다.\n\n"
+        "[분석 출력 형식]\n"
+        "■ 이벤트 요약 (2줄 이내)\n"
+        "■ 직접 영향 노드 목록\n"
+        "  - 노드명 | 국가 | 영향 유형(직접/간접) | 심각도(치명적/심각/보통/경미)\n"
+        "  - 영향 근거 (1줄)\n"
+        "■ 공급망 파급 경로\n"
+        "  - 1차 영향 → 2차 파급 → 3차 파급 흐름 설명\n"
+        "■ 포트폴리오 투자 관점 평가\n"
+        "  - 각 보유 종목별 익스포저(노출도) 및 리스크 수준\n"
+        "■ 면책 고지\n"
+        "  본 분석은 투자 참고 자료이며 실제 투자 결정의 책임은 투자자 본인에게 있습니다."
+    )
+
+    # ── [3] 공급망 데이터 + 뉴스 (가변) ───────────────────────────────────
+    tickers_str = ", ".join(portfolio_tickers)
+
+    # 공급망 노드 목록 텍스트화
+    nodes_text = _format_supply_chain_nodes(supply_chain_nodes)
+
+    variable_content = f"""[포트폴리오 보유 종목]
+{tickers_str}
+
+[등록된 공급망 노드 데이터]
+{nodes_text}
+
+[분석 대상 지정학적 이벤트 뉴스]
+{news_text}
+
+[분석 질문]
+{user_question}"""
+
+    return [
+        {
+            "role": "user",
+            "parts": [supply_chain_context],
+        },
+        {
+            "role": "model",
+            "parts": [
+                "안녕하세요! ARIA입니다. "
+                "공급망 지정학적 리스크 분석을 시작하겠습니다."
+            ],
+        },
+        {
+            "role": "user",
+            "parts": [variable_content],
+        },
+    ]
+
+
+def _format_supply_chain_nodes(nodes: list[dict]) -> str:
+    """
+    공급망 노드 목록을 프롬프트 주입용 텍스트로 변환.
+
+    AI가 공급망 구조를 이해하고 파급 경로를 추론할 수 있도록
+    노드의 위치, 유형, 현재 리스크 수준을 명확히 제공.
+    """
+    if not nodes:
+        return "  (등록된 공급망 노드 없음 — AI가 일반 지식 기반으로 분석)"
+
+    lines = []
+    for node in nodes:
+        ticker_str = f" [{node.get('ticker')}]" if node.get("ticker") else ""
+        city_str = f", {node.get('city')}" if node.get("city") else ""
+        lines.append(
+            f"  • {node.get('name')}{ticker_str} "
+            f"({node.get('node_type')} | {node.get('country_code')}{city_str})\n"
+            f"    섹터: {node.get('industry_sector', '미분류')} | "
+            f"리스크: {node.get('risk_level', 'LOW')}"
+            + (f"\n    설명: {node.get('description')}" if node.get("description") else "")
+        )
+    return "\n".join(lines)

@@ -40,6 +40,7 @@ celery_app = Celery(
     include=[
         "app.worker.tasks.ai_report_tasks",
         "app.worker.tasks.alternative_data_tasks",  # 대안 데이터 수집 태스크
+        "app.worker.tasks.risk_analysis_tasks",     # 지정학적 리스크 분석 태스크 (§7)
     ],
 )
 

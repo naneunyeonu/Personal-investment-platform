@@ -246,3 +246,59 @@ async def generate_document_summary(
         "model": settings.GEMINI_MODEL,
         "generated_at": analysis_time,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. 범용 Gemini 호출 — 지정학적 리스크 분석 등 커스텀 프롬프트
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def call_gemini_raw(
+    messages: list[dict],
+    temperature: float = 0.3,
+    max_output_tokens: int = 3000,
+) -> dict[str, Any]:
+    """
+    커스텀 messages 배열로 Gemini API 직접 호출.
+
+    generate_portfolio_report / generate_document_summary 의
+    표준 파이프라인에 맞지 않는 커스텀 프롬프트(지정학적 리스크 분석 등)에 활용.
+
+    Args:
+        messages:           Gemini content 배열 (role + parts)
+        temperature:        창의성 조정 (금융 분석: 0.3 권장)
+        max_output_tokens:  최대 출력 토큰
+
+    Returns:
+        {
+          "text": str,       # 생성된 텍스트
+          "usage": dict,     # 토큰 사용량
+          "model": str,
+          "generated_at": str,
+        }
+    """
+    analysis_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    model = _get_model()
+
+    response = model.generate_content(
+        contents=messages,
+        generation_config=genai.GenerationConfig(
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
+            top_p=0.9,
+        ),
+    )
+
+    usage = response.usage_metadata
+    cached_tokens = getattr(usage, "cached_content_token_count", 0) or 0
+
+    return {
+        "text": response.text,
+        "usage": {
+            "prompt_tokens": usage.prompt_token_count,
+            "output_tokens": usage.candidates_token_count,
+            "cached_tokens": cached_tokens,
+            "total_tokens": usage.total_token_count,
+        },
+        "model": settings.GEMINI_MODEL,
+        "generated_at": analysis_time,
+    }
