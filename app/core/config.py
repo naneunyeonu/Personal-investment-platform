@@ -19,7 +19,21 @@ class Settings(BaseSettings):
     APP_NAME: str = "AI Investment Support Platform"
     APP_VERSION: str = "0.1.0"
     DEBUG: bool = False
-    ALLOWED_ORIGINS: list[str] = ["http://localhost:3000"]
+
+    # CORS 허용 오리진
+    # - localhost:5173  → Vite 개발 서버 (npm run dev)
+    # - localhost:4173  → Vite 프리뷰 서버 (npm run preview)
+    # - localhost:3000  → CRA / 기타 개발 서버
+    # - 127.0.0.1 변형 → curl / Postman 등 직접 호출 대응
+    # 운영 환경: .env에서 ALLOWED_ORIGINS=["https://yourdomain.com"] 로 덮어쓰기
+    ALLOWED_ORIGINS: list[str] = [
+        "http://localhost:5173",
+        "http://localhost:4173",
+        "http://localhost:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:4173",
+        "http://127.0.0.1:3000",
+    ]
 
     # ── 데이터베이스 ───────────────────────────────────────────────────
     DATABASE_URL: str = Field(
