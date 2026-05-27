@@ -12,17 +12,26 @@
   ⛔ 모의투자 주문   (tr_id: VTTC*)
   → 이 플랫폼은 시세 조회 및 분석 서포트 전용
 
+재시도 전략:
+  - 토큰 발급, 시세 조회 모두 httpx.Client 사용
+  - ConnectError / TimeoutException / HTTP 429·5xx → sync_retry로 최대 3회 재시도
+  - 지수 백오프: 1s → 2s
+
 KIS API 공식 문서: https://apiportal.koreainvestment.com
 """
 
 import asyncio
+import logging
 import time
 from decimal import Decimal
 
 import httpx
 
 from app.adapters.market_data.base import AdapterError, MarketDataProvider, PriceQuote
+from app.adapters.retry import sync_retry
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 _SOURCE = "kis"
 _BASE_URL = "https://openapi.koreainvestment.com:9443"
@@ -61,6 +70,7 @@ class KISAdapter(MarketDataProvider):
     - .KS (KOSPI) / .KQ (KOSDAQ) 접미사 종목 전용
     - 매매 기능 완전 배제 — 시세 조회만 제공
     - OAuth 토큰 자동 갱신 (인메모리 캐시)
+    - 일시적 네트워크 오류 / Rate Limit 재시도 (최대 3회, 지수 백오프)
     """
 
     def __init__(self) -> None:
@@ -83,7 +93,7 @@ class KISAdapter(MarketDataProvider):
         try:
             token = await self._ensure_token()
             data = await asyncio.to_thread(
-                self._fetch_current_price, stock_code, token
+                self._fetch_current_price_with_retry, stock_code, token
             )
             return data
         except AdapterError:
@@ -108,9 +118,24 @@ class KISAdapter(MarketDataProvider):
         if _token_cache.is_valid() and _token_cache.token:
             return _token_cache.token
 
-        token, expires_in = await asyncio.to_thread(self._fetch_token)
+        token, expires_in = await asyncio.to_thread(self._fetch_token_with_retry)
         _token_cache.set(token, expires_in)
         return token
+
+    def _fetch_token_with_retry(self) -> tuple[str, int]:
+        """토큰 발급 + 재시도 래퍼 (최대 3회, 지수 백오프)."""
+        try:
+            return sync_retry(
+                self._fetch_token,
+                max_attempts=3,
+                base_delay=1.0,
+            )
+        except Exception as exc:
+            # sync_retry가 마지막 예외 전파 → AdapterError로 래핑
+            raise AdapterError(
+                _SOURCE,
+                f"Token fetch failed after retries: {exc}",
+            ) from exc
 
     def _fetch_token(self) -> tuple[str, int]:
         """
@@ -131,12 +156,7 @@ class KISAdapter(MarketDataProvider):
         }
         with httpx.Client(timeout=10) as client:
             resp = client.post(url, json=payload)
-
-        if resp.status_code != 200:
-            raise AdapterError(
-                _SOURCE,
-                f"Token issue failed: HTTP {resp.status_code} — {resp.text[:200]}",
-            )
+            resp.raise_for_status()   # 4xx/5xx → HTTPStatusError (sync_retry 판별)
 
         body = resp.json()
         token = body.get("access_token")
@@ -146,6 +166,26 @@ class KISAdapter(MarketDataProvider):
         return token, expires_in
 
     # ── 시세 조회 (매매 관련 API 절대 미사용) ─────────────────────────────
+
+    def _fetch_current_price_with_retry(
+        self, stock_code: str, token: str
+    ) -> PriceQuote:
+        """시세 조회 + 재시도 래퍼 (최대 3회, 지수 백오프)."""
+        try:
+            return sync_retry(
+                self._fetch_current_price,
+                stock_code,
+                token,
+                max_attempts=3,
+                base_delay=1.0,
+            )
+        except AdapterError:
+            raise
+        except Exception as exc:
+            raise AdapterError(
+                _SOURCE,
+                f"Price fetch failed after retries for {stock_code}: {exc}",
+            ) from exc
 
     def _fetch_current_price(self, stock_code: str, token: str) -> PriceQuote:
         """
@@ -171,12 +211,7 @@ class KISAdapter(MarketDataProvider):
 
         with httpx.Client(timeout=10) as client:
             resp = client.get(url, headers=headers, params=params)
-
-        if resp.status_code != 200:
-            raise AdapterError(
-                _SOURCE,
-                f"Price fetch failed: HTTP {resp.status_code} — {resp.text[:200]}",
-            )
+            resp.raise_for_status()   # 4xx/5xx → HTTPStatusError
 
         body = resp.json()
         if body.get("rt_cd") != "0":
