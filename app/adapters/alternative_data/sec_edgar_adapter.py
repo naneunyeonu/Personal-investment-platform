@@ -30,6 +30,7 @@ from typing import Any
 
 import httpx
 
+from app.adapters.retry import async_retry
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -124,8 +125,21 @@ class SecEdgarAdapter:
         sec-api.io EDGAR Full-Text Search API.
         Lucene 쿼리: formType:"4" AND ticker:{TICKER} AND transactionType:S
         정렬: 최신순 (filedAt desc)
+        네트워크 일시 오류 / Rate Limit 시 최대 3회 재시도.
         """
-        # 매도(S) + 매수(P) + 공시 전체를 가져와서 클라이언트에서 필터링
+        return await async_retry(
+            self._fetch_secapi_once,
+            ticker,
+            start_date,
+            end_date,
+            max_attempts=3,
+            base_delay=1.0,
+        )
+
+    async def _fetch_secapi_once(
+        self, ticker: str, start_date: str, end_date: str
+    ) -> dict:
+        """sec-api.io 단건 HTTP 호출 (async_retry 대상 단위 함수)."""
         query_string = (
             f'formType:"4" AND ticker:{ticker} '
             f'AND periodOfReport:[{start_date} TO {end_date}]'
@@ -161,7 +175,21 @@ class SecEdgarAdapter:
         """
         EDGAR EFTS(ElasticSearch Full-Text Search) 무료 API.
         https://efts.sec.gov/LATEST/search-index
+        네트워크 일시 오류 / Rate Limit 시 최대 3회 재시도.
         """
+        return await async_retry(
+            self._fetch_efts_once,
+            ticker,
+            start_date,
+            end_date,
+            max_attempts=3,
+            base_delay=1.0,
+        )
+
+    async def _fetch_efts_once(
+        self, ticker: str, start_date: str, end_date: str
+    ) -> dict:
+        """EDGAR EFTS 단건 HTTP 호출 (async_retry 대상 단위 함수)."""
         params = {
             "q": f'"{ticker}"',
             "forms": "4",

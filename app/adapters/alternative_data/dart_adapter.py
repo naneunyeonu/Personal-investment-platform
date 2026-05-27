@@ -23,7 +23,6 @@ corp_code 조회 방식:
 """
 
 import io
-import json
 import logging
 import zipfile
 from datetime import datetime, timezone
@@ -32,6 +31,7 @@ from xml.etree import ElementTree
 
 import httpx
 
+from app.adapters.retry import async_retry
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -142,13 +142,18 @@ class DartAdapter:
         """
         종목코드(6자리) → DART corp_code(8자리) 변환.
         인메모리 캐시 → DART ZIP 다운로드 순으로 시도.
+        ZIP 다운로드 실패 시 None 반환 (앱 중단 없이 빈 결과로 Graceful Degradation).
         """
         if stock_code in self._corp_code_map:
             return self._corp_code_map[stock_code]
 
         # 캐시 미스: DART corpCode.xml ZIP 다운로드
         if not self._corp_code_map:
-            await self._load_corp_code_map()
+            try:
+                await self._load_corp_code_map()
+            except Exception as exc:
+                logger.warning("corp_code 맵 로드 실패 — Graceful Degradation: %s", exc)
+                return None
 
         return self._corp_code_map.get(stock_code)
 
@@ -156,14 +161,18 @@ class DartAdapter:
         """
         DART corpCode.xml ZIP 다운로드 → stock_code → corp_code 매핑 구축.
         ZIP 내 CORPCODE.xml 파싱 (list 태그 반복).
+        네트워크 일시 오류 시 최대 3회 재시도.
         """
         url = f"{_DART_BASE_URL}/corpCode.xml"
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.get(url, params={"crtfc_key": self._api_key})
-                resp.raise_for_status()
+            resp = await async_retry(
+                self._fetch_corp_code_zip,
+                url,
+                max_attempts=3,
+                base_delay=2.0,  # DART는 응답이 느림 — 여유 있게 대기
+            )
 
-            with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+            with zipfile.ZipFile(io.BytesIO(resp)) as zf:
                 xml_bytes = zf.read("CORPCODE.xml")
 
             root = ElementTree.fromstring(xml_bytes)
@@ -180,6 +189,13 @@ class DartAdapter:
         except Exception as exc:
             logger.warning("DART corpCode.xml 로드 실패: %s", exc)
 
+    async def _fetch_corp_code_zip(self, url: str) -> bytes:
+        """DART corpCode.xml ZIP 단순 다운로드 (async_retry 대상 단위 함수)."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(url, params={"crtfc_key": self._api_key})
+            resp.raise_for_status()
+            return resp.content
+
     # ── 내부: 재무제표 API 호출 ──────────────────────────────────────────────
 
     async def _fetch_financial_statements(
@@ -188,24 +204,45 @@ class DartAdapter:
         """
         DART fnlttSinglAcntAll API 호출 → 재무제표 항목 리스트 반환.
         연결재무제표(CFS) 우선, 없으면 별도재무제표(OFS).
+        네트워크 일시 오류 시 최대 3회 재시도.
         """
-        async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT) as client:
-            for fs_div in (_FS_DIV_CONSOLIDATED, "OFS"):
-                resp = await client.get(
-                    f"{_DART_BASE_URL}/fnlttSinglAcntAll.json",
-                    params={
-                        "crtfc_key": self._api_key,
-                        "corp_code": corp_code,
-                        "bsns_year": bsns_year,
-                        "reprt_code": _REPRT_CODE_ANNUAL,
-                        "fs_div": fs_div,
-                    },
+        for fs_div in (_FS_DIV_CONSOLIDATED, "OFS"):
+            try:
+                data = await async_retry(
+                    self._fetch_single_fs,
+                    corp_code,
+                    bsns_year,
+                    fs_div,
+                    max_attempts=3,
+                    base_delay=2.0,
                 )
-                data = resp.json()
                 if data.get("status") == "000" and data.get("list"):
                     return data["list"]
+            except Exception as exc:
+                logger.warning(
+                    "DART 재무제표 조회 실패 | corp_code=%s year=%s fs_div=%s error=%s",
+                    corp_code, bsns_year, fs_div, exc,
+                )
 
         return []
+
+    async def _fetch_single_fs(
+        self, corp_code: str, bsns_year: str, fs_div: str
+    ) -> dict:
+        """재무제표 단건 API 호출 (async_retry 대상 단위 함수)."""
+        async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT) as client:
+            resp = await client.get(
+                f"{_DART_BASE_URL}/fnlttSinglAcntAll.json",
+                params={
+                    "crtfc_key": self._api_key,
+                    "corp_code": corp_code,
+                    "bsns_year": bsns_year,
+                    "reprt_code": _REPRT_CODE_ANNUAL,
+                    "fs_div": fs_div,
+                },
+            )
+            resp.raise_for_status()
+            return resp.json()
 
 
 # ── 데이터 파싱 ───────────────────────────────────────────────────────────────

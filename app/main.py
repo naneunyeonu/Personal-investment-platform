@@ -34,12 +34,16 @@ app = FastAPI(
 )
 
 # CORS
+# allow_credentials=True 와 allow_origins=["*"] 는 브라우저 정책상 병용 불가.
+# ALLOWED_ORIGINS에 명시적 오리진 목록을 관리한다 (config.py 참조).
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["X-Request-ID", "X-Process-Time"],
+    max_age=600,   # preflight 캐시 10분
 )
 
 # 라우터 등록
@@ -48,4 +52,8 @@ app.include_router(api_v1_router)
 
 @app.get("/health", tags=["Health"])
 async def health_check() -> dict:
-    return {"status": "ok", "version": settings.APP_VERSION}
+    return {
+        "status": "ok",
+        "version": settings.APP_VERSION,
+        "allowed_origins": settings.ALLOWED_ORIGINS,
+    }
