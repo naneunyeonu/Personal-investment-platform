@@ -142,13 +142,18 @@ class DartAdapter:
         """
         종목코드(6자리) → DART corp_code(8자리) 변환.
         인메모리 캐시 → DART ZIP 다운로드 순으로 시도.
+        ZIP 다운로드 실패 시 None 반환 (앱 중단 없이 빈 결과로 Graceful Degradation).
         """
         if stock_code in self._corp_code_map:
             return self._corp_code_map[stock_code]
 
         # 캐시 미스: DART corpCode.xml ZIP 다운로드
         if not self._corp_code_map:
-            await self._load_corp_code_map()
+            try:
+                await self._load_corp_code_map()
+            except Exception as exc:
+                logger.warning("corp_code 맵 로드 실패 — Graceful Degradation: %s", exc)
+                return None
 
         return self._corp_code_map.get(stock_code)
 
