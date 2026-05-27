@@ -2,6 +2,13 @@
 인증 서비스 레이어
 
 라우터와 DB 로직을 분리하여 테스트 가능성 확보.
+
+is_active 전역 필터 적용 방식 (architecture_plan.md §2.2):
+  - 비활성 사용자 차단은 인증 레이어에서 처리됨:
+      get_current_active_user (app/auth/dependencies.py) → 모든 보호 엔드포인트 적용
+  - register_user 의 이메일 중복 검사는 is_active 를 의도적으로 무시:
+      논리적 삭제된 이메일도 '점유 중'으로 유지 → 데이터 혼동 및 보안 사고 방지
+  - login_user / refresh_tokens 는 조회 후 is_active 를 명시적으로 확인
 """
 
 from fastapi import HTTPException, status
